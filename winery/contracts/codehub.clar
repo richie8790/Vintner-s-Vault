@@ -1,4 +1,5 @@
-;; Decentralized Wine Investment Consortium - Stage 2
+;; Decentralized Wine Investment Consortium
+;; A Clarity smart contract for collaborative fine wine acquisition, authentication, and trading
 
 ;; Constants
 (define-constant ERR-NOT-CELLAR-MASTER (err u1))
@@ -287,6 +288,77 @@
             }))
         
         (ok true)))
+
+;; Finalize Investment Season
+(define-public (finalize-investment-season)
+    (begin
+        ;; Only cellar master can finalize season
+        (asserts! (is-cellar-master) ERR-NOT-AUTHORIZED)
+        (asserts! (var-get consortium-active) ERR-CONSORTIUM-INACTIVE)
+        
+        ;; Advance investment season
+        (var-set investment-season (+ (var-get investment-season) u1))
+        
+        (ok true)))
+
+;; Process Specific Acquisition
+(define-public (process-acquisition (acquisition-id uint))
+    (let (
+        (acquisition (unwrap! (map-get? vintage-acquisitions acquisition-id) ERR-ACQUISITION-NOT-FOUND))
+        (appraisal-tally (unwrap! (map-get? appraisal-tallies acquisition-id) ERR-ACQUISITION-NOT-FOUND))
+        (vintage (unwrap! (map-get? wine-vintages (get target-vintage acquisition)) ERR-INVALID-VINTAGE))
+        (sommelier (unwrap! (map-get? sommelier-profiles (get sommelier acquisition)) ERR-INVALID-PARAMETER))
+        )
+        
+        ;; Only cellar master can process acquisitions
+        (asserts! (is-cellar-master) ERR-NOT-AUTHORIZED)
+        (asserts! (var-get consortium-active) ERR-CONSORTIUM-INACTIVE)
+        
+        ;; Ensure acquisition hasn't already been finalized
+        (asserts! (not (get finalized acquisition)) ERR-VINTAGE-LOCKED)
+        
+        ;; Check for sufficient appraisals and meeting threshold
+        (if (and 
+                (> (+ (get approval-weight appraisal-tally) (get rejection-weight appraisal-tally)) u0)
+                (>= (* (get approval-weight appraisal-tally) u100) 
+                    (* (+ (get approval-weight appraisal-tally) (get rejection-weight appraisal-tally)) (var-get acquisition-threshold)))
+            )
+            (begin
+                ;; Update acquisition status
+                (map-set vintage-acquisitions acquisition-id
+                    (merge acquisition {finalized: true}))
+                
+                ;; Update vintage data
+                (map-set wine-vintages (get target-vintage acquisition)
+                    (merge vintage {
+                        provenance-hash: (get certificate-hash acquisition),
+                        finalized-acquisitions: (+ (get finalized-acquisitions vintage) u1)
+                    }))
+                
+                ;; Add sommelier to vintage sommeliers if not already
+                (match (map-get? vintage-sommeliers {vintage-id: (get target-vintage acquisition), sommelier: (get sommelier acquisition)})
+                    existing-commitment
+                    true
+                    ;; Add new sommelier
+                    (map-set vintage-sommeliers 
+                        {vintage-id: (get target-vintage acquisition), sommelier: (get sommelier acquisition)}
+                        {expertise-committed: (get expertise sommelier)}))
+                
+                ;; Update vintage's total expertise
+                (map-set wine-vintages (get target-vintage acquisition)
+                    (merge vintage {
+                        total-expertise: (+ (get total-expertise vintage) (get expertise sommelier))
+                    }))
+                
+                ;; Reward sommelier with expertise boost
+                (map-set sommelier-profiles (get sommelier acquisition)
+                    (merge sommelier {
+                        expertise: (+ (get expertise sommelier) u25),
+                        appraisal-weight: (+ (get appraisal-weight sommelier) u10)
+                    }))
+                
+                (ok true))
+            (ok false)))) ;; No action if threshold not met
 
 ;; Change Vintage Acquisition Status
 (define-public (set-vintage-acquisition-status (vintage-id uint) (open bool))
